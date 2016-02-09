@@ -1,0 +1,173 @@
+#!/bin/bash
+#
+# Script for displaying information about directories
+#
+# Author: Peter Pakos <peter.pakos@wandisco.com>
+
+set -e
+set -u
+
+# Constants
+readonly VERSION="15.11.12a"
+readonly APP_NAME=$(basename $0)
+readonly APP_TMP=$(mktemp -dt "${APP_NAME}.XXXXXXXX")
+
+# Functions
+die() {
+  local message="$1"
+  echo -e "${message}" >&2
+  exit 1
+}
+
+print_line() {
+  local format="%-8s%-8s%-8s%-8s%-s\n"
+  local size="$1"
+  local dirs="$2"
+  local files="$3"
+  local inodes="$4"
+  local dir="$5"
+  printf "${format}" "${size}" "${dirs}" "${files}" "${inodes}" "${dir}"
+}
+
+display_info() {
+  readonly SAVEIFS=$IFS
+  local dirs="$1"
+  local dir
+  local nodirs
+  local nofiles
+  local noinodes
+  local size
+
+  # Set new Internal Field Separator
+  IFS=$(echo -en "\n\b")
+
+  for dir in $dirs; do
+  (
+    nodirs=$(find "${dir}" -type d 2>/dev/null | wc -l | awk '{print $1}')
+    nofiles=$(find "${dir}" -type f 2>/dev/null | wc -l | awk '{print $1}')
+    noinodes=$(( $nodirs + $nofiles ))
+    size=$(du -sh "${dir}" 2>/dev/null | awk '{print $1}')
+    print_line "${size}" "${nodirs}" "${nofiles}" "${noinodes}" "$dir"
+  ) & echo "$!" >> "${PID_FILE}"
+  done
+  wait
+
+  # Restore IFS
+  IFS=$SAVEIFS
+}
+
+display_version() {
+  echo "${APP_NAME} version ${VERSION}"
+}
+
+display_help() {
+  display_version
+  cat <<HELP
+Usage: ${APP_NAME} [OPTIONS] DIR[S]
+AVAILABLE OPTIONS:
+-s  Sort order by size
+-d  Sort order by number of directories
+-f  Sort order by number of files
+-i  Sort order by number of inodes
+-h  Print this help summary page
+-v  Print version number
+HELP
+}
+
+check_sort_app() {
+  local sort_app
+  if type gsort &>/dev/null; then
+    sort_app="gsort"
+  elif type sort &>/dev/null; then
+    sort_app="sort"
+  else
+    die "gsort/sort program not found, exiting..."
+  fi
+  echo "${sort_app}"
+}
+
+cleanup() {
+  if [[ -f "${PID_FILE}" ]]; then
+  local pid
+    for pid in $(cat "${PID_FILE}"); do
+      if ps -p $pid &>/dev/null; then
+        kill $pid 2>/dev/null
+      fi
+    done
+  fi
+  [[ -d "${APP_TMP}" ]] && rm -rf "${APP_TMP}"
+}
+
+main() {
+  readonly PID_FILE="${APP_TMP}/pid_file"
+  local sort_cmd=
+  local dirs
+
+  # Catch signals
+  trap cleanup EXIT SIGHUP SIGINT SIGTERM
+
+  # Check args
+  while getopts ":sdfivh" opt; do
+    case $opt in
+      s)
+        sort_cmd="-rhk1,1"
+        ;;
+      d)
+        sort_cmd="-rnk2,2"
+        ;;
+      f)
+        sort_cmd="-rnk3,3"
+        ;;
+      i)
+        sort_cmd="-rnk4,4"
+        ;;
+      v)
+        display_version
+        exit 0
+        ;;
+      h)
+        display_help
+        exit 0
+        ;;
+      *)
+        echo -e "Invalid option: -${OPTARG}\n"
+        display_help
+        exit 1
+        ;;
+    esac
+    shift $((OPTIND-1))
+  done
+
+  # Get sort cmd if sorting
+  [[ -n "${sort_cmd}" ]] && sort_cmd="$(check_sort_app) ${sort_cmd}"
+
+  # Display help if no args left
+  if [[ $# -lt 1 ]]; then
+    display_help
+    exit 1
+  fi
+
+  # Get dir list
+  dirs="$(find "$@" -maxdepth 0 -type d)"
+
+  # Check if any dirs were found
+  if [[ -z "${dirs}" ]]; then
+    echo -e "No directories found.\n"
+    display_help
+    exit 1
+  fi
+
+  # Print header
+  print_line "SIZE" "DIRS" "FILES" "INODES" "DIR"
+
+  # Display dir info
+  if [[ -n "${sort_cmd}" ]]; then
+    display_info "${dirs}" | ${sort_cmd}
+  else
+    display_info "${dirs}"
+  fi
+
+  exit 0
+}
+
+main "$@"
